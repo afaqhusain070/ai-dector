@@ -1,57 +1,46 @@
 import { StateGraph } from "@langchain/langgraph";
+import { z } from "zod";
 
 import { loadPdf } from "../ingest/loadPdf.js";
 import { preprocess, chunk, extractFeatures } from "../features/extract.js";
 import { embedChunks } from "../embed/embedding.js";
 import { classify } from "../model/classifier.js";
 
-export const graph = new StateGraph({
-  states: {
-    filePath: null,
-    text: null,
-    chunks: null,
-    features: null,
-    embeddings: null,
-    vectors: null,
-    result: null,
-  },
-  edges: {
-    START: "load",
-    load: "prep",
-    prep: "makeChunks",
-    makeChunks: "embed",
-    embed: "feat",
-    feat: "combine",
-    combine: "predict",
-    predict: "END",
-  },
+// Define a Zod schema for the graph state
+const StateSchema = z.object({
+  filePath: z.string().describe("Path to the input file"),
+  text: z.string().optional(),
+  chunks: z.array(z.string()).optional(),
+  features: z.array(z.array(z.number())).optional(),
+  embeddings: z.array(z.array(z.number())).optional(),
+  vectors: z.array(z.array(z.number())).optional(),
+  result: z.any().optional(),
 });
 
-graph.defineNode("load", async (s) => {
-  s.text = await loadPdf(s.filePath);
-  return s;
-});
-graph.defineNode("prep", async (s) => {
-  s.text = preprocess(s.text);
-  return s;
-});
-graph.defineNode("makeChunks", async (s) => {
-  s.chunks = chunk(s.text);
-  return s;
-});
-graph.defineNode("embed", async (s) => {
-  s.embeddings = await embedChunks(s.chunks);
-  return s;
-});
-graph.defineNode("feat", async (s) => {
-  s.features = s.chunks.map((c) => extractFeatures(c));
-  return s;
-});
-graph.defineNode("combine", async (s) => {
-  s.vectors = s.embeddings.map((e, i) => [...e, ...s.features[i]]);
-  return s;
-});
-graph.defineNode("predict", async (s) => {
-  s.result = await classify(s.vectors);
-  return s;
-});
+// Build the graph using the zod schema and the proper StateGraph APIs
+const builder = new StateGraph(StateSchema);
+
+builder
+  .addNode("load", async (s) => ({ text: await loadPdf(s.filePath) }))
+  .addNode("prep", (s) => ({ text: preprocess(s.text) }))
+  .addNode("makeChunks", (s) => ({ chunks: chunk(s.text) }))
+  .addNode("embed", async (s) => ({ embeddings: await embedChunks(s.chunks) }))
+  .addNode("feat", (s) => ({
+    features: s.chunks.map((c) => extractFeatures(c)),
+  }))
+  .addNode("combine", (s) => ({
+    vectors: s.embeddings.map((e, i) => [...e, ...s.features[i]]),
+  }))
+  .addNode("predict", async (s) => ({ result: await classify(s.vectors) }));
+
+builder
+  .addEdge("__start__", "load")
+  .addEdge("load", "prep")
+  .addEdge("prep", "makeChunks")
+  .addEdge("makeChunks", "embed")
+  .addEdge("embed", "feat")
+  .addEdge("feat", "combine")
+  .addEdge("combine", "predict")
+  .addEdge("predict", "__end__");
+
+export const graph = builder.compile();
